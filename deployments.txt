@@ -1,0 +1,14 @@
+# Deployments to process, one per line.
+#
+# Blank lines and everything after a '#' are ignored.
+#
+# Secret name in AWS Secrets Manager is derived from the deployment name:
+#   cdm-fed       -> federal_store
+#   cdm-<agency>  -> agency_<agency>_store
+#
+# Replace the entries below with your real deployment list.
+
+cdm-fed
+cdm-va
+cdm-dos
+cdm-tva
