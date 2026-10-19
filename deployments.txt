@@ -1,5 +1,6 @@
-# Deployments to process, one per line.
+# Deployments processed by:   ./reset_kibana_state_session.sh all
 #
+# One deployment per line, or several separated by spaces or commas.
 # Blank lines and everything after a '#' are ignored.
 #
 # Secret name in AWS Secrets Manager is derived from the deployment name:

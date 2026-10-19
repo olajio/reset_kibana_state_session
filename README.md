@@ -26,7 +26,7 @@ POST /s/<space_id>/api/kibana/settings/state:storeInSessionStorage
 
 ## Requirements
 
-- `bash` 4+, `curl`, `jq`
+- `bash` 4+, `curl`, `jq` 1.5 or later, `awk`
 - `aws` CLI, already authenticated with permission to read the relevant secrets
   (`secretsmanager:GetSecretValue`)
 - A Kibana user (or API key) per deployment that may change advanced settings
@@ -69,7 +69,9 @@ The script accepts the common key spellings and takes the first one it finds:
 - Password keys: `kibana_password`, `kibana_pass`, `elastic_password`,
   `password`, `pass`, …
 - API key instead of username/password: `kibana_api_key`, `api_key`, `apiKey`
-  (sent as `Authorization: ApiKey …`)
+  (sent as `Authorization: ApiKey …`). Store the base64 `encoded` value that
+  Elasticsearch returns when the key is created, not the separate `id` and
+  `api_key` fields.
 
 If your secrets use different names, set `SECRET_KEYS_URL`,
 `SECRET_KEYS_USERNAME`, `SECRET_KEYS_PASSWORD` or `SECRET_KEYS_API_KEY` to a
@@ -91,31 +93,53 @@ KIBANA_URL_TEMPLATE='https://kibana.{{deployment}}.example.gov' \
 
 ## Usage
 
-List your deployments in `deployments.txt`, one per line (`#` comments and blank
-lines are ignored), then:
-
 ```bash
-# See what would change, everywhere. Always start here.
-./reset_kibana_state_session.sh --dry-run
+# See what would change across every deployment in deployments.txt. Start here.
+./reset_kibana_state_session.sh --dry-run all
 
 # Do it, for every deployment in deployments.txt
-./reset_kibana_state_session.sh
+./reset_kibana_state_session.sh all
 
-# Only certain deployments (overrides the file)
+# Only certain deployments (the file is not read)
 ./reset_kibana_state_session.sh cdm-va cdm-fed
+./reset_kibana_state_session.sh cdm-va,cdm-fed          # commas work too
 
 # A different list, unattended, with a CSV report for the change record
-./reset_kibana_state_session.sh --file prod.txt --yes --report-csv reset-report.csv
+./reset_kibana_state_session.sh --file prod.txt --yes --report-csv reset-report.csv all
 
-# Only the master spaces
-./reset_kibana_state_session.sh --spaces master
+# Only the master spaces, everywhere
+./reset_kibana_state_session.sh --spaces master all
 ```
+
+### Choosing deployments
+
+| You pass | What runs |
+| --- | --- |
+| `all` | Every deployment in the deployments file |
+| one or more names | Only those deployments; the file is not read |
+| nothing | Same as `all` |
+
+`all` is a wildcard, not a deployment name. It is case-insensitive (`ALL` and
+`All` work too) and cannot be mixed with names: `all cdm-va` is rejected with
+exit status `2` before anything runs, rather than guessing which you meant.
+
+### The deployments file
+
+- Defaults to `deployments.txt`, looked for in the current directory and then
+  next to the script — so `all` works from cron or any other directory.
+  `--file PATH` (or `DEPLOYMENTS_FILE=PATH`) uses exactly that file instead.
+- One deployment per line, or several separated by spaces or commas
+  (`cdm-va, cdm-dos`). Blank lines and anything after `#` are ignored; Windows
+  line endings are fine.
+- A name listed twice is processed once, with a warning.
+- A line reading `all` is skipped with a warning — it is the command-line
+  wildcard, never a deployment.
 
 Full flag list: `./reset_kibana_state_session.sh --help`.
 
 | Flag | Meaning |
 | --- | --- |
-| `-f, --file PATH` | Deployments file (default `deployments.txt`) |
+| `-f, --file PATH` | Deployments file read by `all` (default `deployments.txt`) |
 | `-n, --dry-run` | Report what would change; change nothing |
 | `--reset-to-default` | Send `{"value": null}` — removes the override, exactly like the UI's *Reset to default* — instead of writing an explicit `false` |
 | `--force` | Write even where the value is already false |
@@ -159,10 +183,10 @@ Kibana serves it.
  REPORT - state:storeInSessionStorage
 ================================================================
 
-DEPLOYMENT       SPACE_ID           SPACE_NAME             BEFORE                 ACTION             DETAIL
-cdm-va           default            Default                unset(default false)   already-false      no change needed
-cdm-va           master             Master                 true                   reset              now false
-cdm-va           analytics          Analytics              true                   reset              now false
+DEPLOYMENT  SPACE_ID   SPACE_NAME  BEFORE                ACTION         DETAIL
+cdm-va      default    Default     unset(default false)  already-false  no change needed
+cdm-va      master     Master      true                  reset          now false
+cdm-va      analytics  Analytics   true                  reset          now false
 
 Summary
   deployments succeeded : 1
@@ -177,18 +201,30 @@ Actions: `reset`, `already-false`, `would-reset` (dry run), `reset-unverified`
 (write succeeded, re-read failed), `skipped`, `failed`.
 
 Exit status is `0` when every targeted space ended up at `false`, `1` if any
-deployment or space failed, `2` on a usage error. One failing deployment does
-not stop the rest — the run continues and the failure appears in the report.
+deployment or space failed, `2` on a usage error (bad option or argument, or an
+unwritable `--report-csv` path) — in which case nothing was read or changed.
+One failing deployment does not stop the rest — the run continues and the
+failure appears in the report.
 
 ## Safety notes
 
 - Idempotent: re-running reports `already-false` and makes no further writes.
-- Interactive runs ask for confirmation first; `--yes` skips that for CI.
+- Changing settings needs a yes. Run from a terminal, the script asks first;
+  run without one (cron, CI, `ssh host '…'`), it refuses unless `--yes` is
+  given, rather than silently changing every deployment. `--dry-run` never
+  needs it, so a scheduled drift check runs unattended.
 - Credentials are passed to `curl` through a `0600` config file in a `0700`
   temporary directory, so they never appear in the process list or in any log
   line. The temporary directory is removed on exit.
 - Transport errors, `429` and `5xx` are retried with linear backoff; `4xx`
   responses are not (a `401`/`403` means fix the credentials, not retry).
+- A response that is not what Kibana returns — `{}` from a proxy, an HTML
+  login page served with status `200` — is reported as `failed`. It is never
+  mistaken for "setting not present" and skipped as `already-false`.
+- Redirects are not followed. Following one would turn the `POST` into a `GET`,
+  and older `curl` versions forward the `Authorization` header to whatever host
+  the redirect names. A redirect is reported with its target so the URL in the
+  secret can be corrected.
 - Roughly three HTTP calls per space, run sequentially. For 100+ deployments
   expect the run to take a while; split the deployments file across a few
   parallel invocations if that matters.
@@ -203,6 +239,15 @@ cluster:
 ./tests/run_tests.sh
 ```
 
-It covers the secret-name mapping, dry run, the real reset, idempotency, space
-filters, deployments-file parsing, per-deployment failure isolation,
-`--reset-to-default`, and that credentials never reach the output.
+It covers the secret-name mapping, the `all` wildcard and every way of naming
+deployments, deployments-file parsing and lookup, usage errors (exit `2`, with
+nothing read or changed), dry run, the real reset, idempotency, space filters,
+API-key and username/password authentication, unexpected Kibana responses and
+redirects, per-deployment failure isolation, `--reset-to-default`, and that
+credentials never reach the output or the report.
+
+The script supports jq 1.5 and later. To run the suite against a specific jq:
+
+```bash
+JQ_BIN_DIR=/path/to/dir/containing/jq ./tests/run_tests.sh
+```
