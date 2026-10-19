@@ -119,7 +119,13 @@ secrets = {
     "federal_store":         {"kibana_url": base, **basic},
     "agency_va_store":       {"kibana_url": base, **basic},
     "agency_dos_store":      {"kibana_url": base, **basic},
-    "agency_apikey_store":   {"kibana_url": base, "kibana_api_key": api_key},
+    # The real deployment secret schema: kibana_url + awx_manage_kibana_api_key.
+    "agency_apikey_store":   {"kibana_url": base, "awx_manage_kibana_api_key": api_key},
+    # API key alongside unrelated, wrong username/password: the key must win.
+    "agency_apiprio_store":  {"kibana_url": base, "awx_manage_kibana_api_key": api_key,
+                              "username": "someone-else", "password": "not-the-kibana-one"},
+    # Older key name, still accepted as a fallback.
+    "agency_legacykey_store": {"kibana_url": base, "kibana_api_key": api_key},
     "agency_bogus_store":    {"kibana_url": base + "/bogus", **basic},
     "agency_html_store":     {"kibana_url": base + "/html", **basic},
     "agency_redirect_store": {"kibana_url": base + "/redirect", **basic},
@@ -349,8 +355,19 @@ check_contains "cdm-fed still processed"    "secret 'federal_store'"
 # ==========================================================================
 printf '\nTest: Kibana URL and API key read from the secret\n'
 run apikey --dry-run cdm-apikey
-check_rc "API key authentication works" 0
+check_rc "kibana_url + awx_manage_kibana_api_key secret authenticates" 0
 check_contains "API key deployment lists all spaces" 'cdm-apikey: 3 space(s) processed'
+
+# --force so the POST really happens (the spaces are already false by now).
+run apikey_real --yes --force cdm-apikey
+check_rc "writing the setting with awx_manage_kibana_api_key works" 0
+check_contains "write via API key verified" 'cdm-apikey/master: state:storeInSessionStorage reset (false -> false)'
+
+run apiprio --dry-run cdm-apiprio
+check_rc "API key is used even when username/password are also present" 0
+
+run legacykey --dry-run cdm-legacykey
+check_rc "older kibana_api_key name still works as a fallback" 0
 
 run_cmd custkeys env SECRET_KEYS_URL=kbn_endpoint SECRET_KEYS_USERNAME=svc_user SECRET_KEYS_PASSWORD=svc_pw \
     "$SCRIPT" --dry-run cdm-custkeys

@@ -85,10 +85,12 @@ AGENCY_SECRET_EXAMPLE="${AGENCY_SECRET_TEMPLATE//$PH_AGENCY/<agency>}"
 
 # Which JSON keys inside the secret hold what. Each is a space separated list
 # of candidates, tried in order; the first one present and non-empty wins.
+# The deployment secrets hold the Kibana URL under `kibana_url` and the API key
+# under `awx_manage_kibana_api_key`; those come first. The rest are fallbacks.
 SECRET_KEYS_URL="${SECRET_KEYS_URL:-kibana_url KIBANA_URL kibanaUrl kibana_endpoint kibana_host kibana_uri kibana url endpoint}"
 SECRET_KEYS_USERNAME="${SECRET_KEYS_USERNAME:-kibana_username KIBANA_USERNAME kibanaUsername kibana_user elastic_username elasticsearch_username username user}"
 SECRET_KEYS_PASSWORD="${SECRET_KEYS_PASSWORD:-kibana_password KIBANA_PASSWORD kibanaPassword kibana_pass elastic_password elasticsearch_password password pass}"
-SECRET_KEYS_API_KEY="${SECRET_KEYS_API_KEY:-kibana_api_key KIBANA_API_KEY kibanaApiKey api_key apiKey}"
+SECRET_KEYS_API_KEY="${SECRET_KEYS_API_KEY:-awx_manage_kibana_api_key kibana_api_key KIBANA_API_KEY kibanaApiKey api_key apiKey}"
 
 # Optional fallback when the secret carries no Kibana URL.
 # Placeholders: {{deployment}} {{agency}}

@@ -16,6 +16,8 @@ script's error handling against things a real deployment can do:
     /html/...      settings reads return 200 with an HTML page (e.g. an SSO
                    login page in front of Kibana)
     /redirect/...  every request is answered with a 302 to another host
+    /slow/...      every request waits SLOW_SECONDS before being answered
+                   normally (to exercise timeouts)
 
 Started by tests/run_tests.sh. Prints the port it bound to on stdout.
 """
@@ -24,6 +26,7 @@ import base64
 import json
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 USERNAME = "kibana_admin"
@@ -45,7 +48,8 @@ SETTINGS = {
 }
 
 SETTINGS_RE = re.compile(r"^(?:/s/([^/]+))?/api/kibana/settings(?:/(.+))?$")
-MODES = ("/bogus", "/html", "/redirect")
+MODES = ("/bogus", "/html", "/redirect", "/slow")
+SLOW_SECONDS = 5
 HTML_PAGE = "<html>\n\t<head><title>Sign in</title></head>\n\t<body>\tPlease log in</body>\n</html>\n"
 
 
@@ -114,6 +118,8 @@ class Handler(BaseHTTPRequestHandler):
     # -- verbs -----------------------------------------------------------
     def do_GET(self):
         mode, path = self._split_mode()
+        if mode == "/slow":
+            time.sleep(SLOW_SECONDS)
         if mode == "/redirect":
             self._redirect(path)
             return
@@ -143,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self._reject_unauthenticated():
             return
-        if mode is not None:  # misbehaving modes never accept writes
+        if mode not in (None, "/slow"):  # misbehaving modes never accept writes
             self._send_json(500, {"statusCode": 500, "message": "mode does not accept writes"})
             return
         if self.headers.get("kbn-xsrf") is None:

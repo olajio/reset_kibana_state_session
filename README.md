@@ -33,6 +33,24 @@ POST /s/<space_id>/api/kibana/settings/state:storeInSessionStorage
   in every space — in practice a superuser, since Advanced Settings are
   space-scoped saved objects
 
+## Running from Ansible Automation Platform
+
+`playbooks/reset_kibana_state_session.yml` runs the script on the appserver
+from AAP, with a survey for the inputs. [docs/aap-setup.md](docs/aap-setup.md)
+walks through creating the project, inventory, credential, job template and
+survey; `aap/survey_spec.json` holds the survey for import through the API.
+
+| Path | What |
+| --- | --- |
+| `reset_kibana_state_session.sh` | The script |
+| `deployments.txt` | The deployments `all` expands to |
+| `playbooks/reset_kibana_state_session.yml` | AAP playbook (runs on the `appserver` group) |
+| `playbooks/files/summarize_report.awk` | Summarises the run's CSV across every deployment |
+| `inventory/hosts.yml` | Example inventory with the `appserver` group |
+| `aap/survey_spec.json` | The job template survey |
+| `docs/aap-setup.md` | AAP setup, step by step |
+| `tests/` | Test suites for the script and the playbook |
+
 ## Deployment → secret mapping
 
 The AWS Secrets Manager secret name is derived from the deployment name:
@@ -51,27 +69,34 @@ scheme ever changes.
 
 ## Secret contents
 
-Each secret must be a JSON object holding the Kibana endpoint and credentials.
-The script accepts the common key spellings and takes the first one it finds:
+Each deployment's secret is a JSON object. The two keys the script uses are:
 
 ```json
 {
   "kibana_url": "https://kibana.cdm-va.example.gov",
-  "kibana_username": "svc_kibana_admin",
-  "kibana_password": "..."
+  "awx_manage_kibana_api_key": "<base64 encoded API key>"
 }
 ```
 
-- URL keys tried: `kibana_url`, `KIBANA_URL`, `kibanaUrl`, `kibana_endpoint`,
-  `kibana_host`, `kibana_uri`, `kibana`, `url`, `endpoint`
-- Username keys: `kibana_username`, `kibana_user`, `elastic_username`,
-  `username`, `user`, …
-- Password keys: `kibana_password`, `kibana_pass`, `elastic_password`,
-  `password`, `pass`, …
-- API key instead of username/password: `kibana_api_key`, `api_key`, `apiKey`
-  (sent as `Authorization: ApiKey …`). Store the base64 `encoded` value that
-  Elasticsearch returns when the key is created, not the separate `id` and
-  `api_key` fields.
+- `kibana_url` — the Kibana endpoint.
+- `awx_manage_kibana_api_key` — sent as `Authorization: ApiKey <value>`. It
+  must be the base64 `encoded` form Elasticsearch returns when a key is
+  created (not the separate `id` and `api_key` fields), and the key needs
+  privileges to change advanced settings in every space.
+
+Other keys in the secret are ignored. When the API key is present it is always
+used, even if the secret also holds unrelated `username`/`password` fields.
+
+For secrets that don't follow that schema the script also accepts, in order of
+preference:
+
+- URL: `KIBANA_URL`, `kibanaUrl`, `kibana_endpoint`, `kibana_host`,
+  `kibana_uri`, `kibana`, `url`, `endpoint`
+- API key: `kibana_api_key`, `KIBANA_API_KEY`, `kibanaApiKey`, `api_key`,
+  `apiKey`
+- Or, only when there is no API key, a username and password: `kibana_username`
+  / `kibana_password`, `elastic_username` / `elastic_password`, `username` /
+  `password`, …
 
 If your secrets use different names, set `SECRET_KEYS_URL`,
 `SECRET_KEYS_USERNAME`, `SECRET_KEYS_PASSWORD` or `SECRET_KEYS_API_KEY` to a
@@ -251,3 +276,19 @@ The script supports jq 1.5 and later. To run the suite against a specific jq:
 ```bash
 JQ_BIN_DIR=/path/to/dir/containing/jq ./tests/run_tests.sh
 ```
+
+`tests/run_playbook_tests.sh` runs the real AAP playbook against the local
+machine (standing in for the appserver), with the same mock Kibana and a stub
+`aws` serving secrets in the real `kibana_url` / `awx_manage_kibana_api_key`
+schema. It needs ansible-core 2.15 or later, but no AAP, AWS or sudo:
+
+```bash
+./tests/run_playbook_tests.sh
+ANSIBLE_BIN_DIR=/path/to/venv/bin ./tests/run_playbook_tests.sh   # a specific install
+```
+
+It covers input validation (nothing reaches the appserver on bad input), dry
+run and execute, `all`, every input form the survey can send, each survey
+option, the missing-tool check, a failing deployment (all output still shown,
+then the job fails), a job that times out, and that the survey spec matches the
+playbook.

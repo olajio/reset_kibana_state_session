@@ -1,0 +1,102 @@
+{
+  "name": "Reset Kibana state:storeInSessionStorage",
+  "description": "Choose deployments and whether to preview (dry-run) or apply (execute).",
+  "spec": [
+    {
+      "question_name": "Deployments",
+      "question_description": "Deployment names separated by commas, spaces or new lines (e.g. cdm-va, cdm-fed), or all for every deployment in deployments.txt. all cannot be combined with names.",
+      "required": true,
+      "type": "textarea",
+      "variable": "deployments",
+      "min": 1,
+      "max": 10000,
+      "default": "",
+      "choices": "",
+      "new_question": true
+    },
+    {
+      "question_name": "Run mode",
+      "question_description": "dry-run reports what would change and changes nothing. execute changes the setting.",
+      "required": true,
+      "type": "multiplechoice",
+      "variable": "run_mode",
+      "min": null,
+      "max": null,
+      "default": "dry-run",
+      "choices": ["dry-run", "execute"],
+      "new_question": true
+    },
+    {
+      "question_name": "Value to write",
+      "question_description": "set-false writes an explicit false (visible in Advanced Settings). reset-to-default removes the override, like the UI's Reset to default. Both leave the setting false.",
+      "required": true,
+      "type": "multiplechoice",
+      "variable": "value_mode",
+      "min": null,
+      "max": null,
+      "default": "set-false",
+      "choices": ["set-false", "reset-to-default"],
+      "new_question": true
+    },
+    {
+      "question_name": "Only these spaces (optional)",
+      "question_description": "Kibana space IDs to limit the run to, separated by commas or spaces (e.g. default, master). Leave blank for every space.",
+      "required": false,
+      "type": "text",
+      "variable": "spaces",
+      "min": 0,
+      "max": 2048,
+      "default": "",
+      "choices": "",
+      "new_question": true
+    },
+    {
+      "question_name": "Skip these spaces (optional)",
+      "question_description": "Kibana space IDs to leave alone, separated by commas or spaces. Leave blank to skip none.",
+      "required": false,
+      "type": "text",
+      "variable": "exclude_spaces",
+      "min": 0,
+      "max": 2048,
+      "default": "",
+      "choices": "",
+      "new_question": true
+    },
+    {
+      "question_name": "Parallel jobs",
+      "question_description": "How many copies of the script run on the appserver at once. Deployments are split evenly between them.",
+      "required": true,
+      "type": "integer",
+      "variable": "parallel_jobs",
+      "min": 1,
+      "max": 50,
+      "default": 10,
+      "choices": "",
+      "new_question": true
+    },
+    {
+      "question_name": "Verify Kibana TLS certificates",
+      "question_description": "Keep true. false skips certificate checks for Kibana (last resort).",
+      "required": true,
+      "type": "multiplechoice",
+      "variable": "verify_ssl",
+      "min": null,
+      "max": null,
+      "default": "true",
+      "choices": ["true", "false"],
+      "new_question": true
+    },
+    {
+      "question_name": "Verbose logging",
+      "question_description": "true logs every Kibana API request (URLs only, never credentials).",
+      "required": true,
+      "type": "multiplechoice",
+      "variable": "verbose",
+      "min": null,
+      "max": null,
+      "default": "false",
+      "choices": ["false", "true"],
+      "new_question": true
+    }
+  ]
+}

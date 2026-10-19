@@ -1,0 +1,480 @@
+---
+# Reset Kibana's `state:storeInSessionStorage` advanced setting to false in
+# every space of one or more deployments, from Ansible Automation Platform.
+#
+# Why: when the setting is true, Kibana keeps global state in the browser's
+# sessionStorage and puts only a short hash in the URL (`?_g=h@8c48049`). After
+# a cluster change or upgrade those entries go stale and users get "Unable to
+# completely restore the URL, be sure to use the share functionality".
+#
+# Each run copies reset_kibana_state_session.sh from the AAP project checkout to
+# the appserver and runs it there. The script reads each deployment's
+# `kibana_url` and `awx_manage_kibana_api_key` from AWS Secrets Manager using
+# the appserver's attached IAM role (secret name from the deployment name:
+# cdm-<agency> -> agency_<agency>_store, cdm-fed -> federal_store), lists every
+# Kibana space, sets the value in each one, re-reads it to verify, and reports.
+#
+# SAFETY:
+#   Defaults to run_mode = "dry-run". Nothing is changed unless run_mode is
+#   explicitly "execute". In execute mode --yes is passed automatically, since
+#   AAP has no interactive terminal; without it the script refuses to change
+#   anything. The job fails if any deployment or space fails, so a green job
+#   means every targeted space ended up false.
+#
+# Survey inputs (docs/aap-setup.md has the full survey):
+#   deployments     required. Names separated by commas, spaces or new lines,
+#                   e.g. "cdm-va, cdm-dos", or "all" for every deployment in
+#                   deployments.txt. "all" cannot be combined with names. A list
+#                   also works: -e '{"deployments": ["cdm-va", "cdm-dos"]}'.
+#   run_mode        dry-run | execute. Default dry-run.
+#   value_mode      set-false | reset-to-default. Default set-false.
+#   spaces          optional. Only these space IDs, e.g. "default, master".
+#   exclude_spaces  optional. Skip these space IDs.
+#   parallel_jobs   how many copies of the script run at once. Default 10.
+#   verify_ssl      default true.
+#   verbose         default false.
+
+- name: Reset Kibana state:storeInSessionStorage
+  hosts: appserver
+  gather_facts: false
+  # Escalate to root on the appserver via sudo (configured on the AAP Machine
+  # credential), as /opt is root-owned on RHEL-family hosts.
+  become: true
+
+  vars:
+    # -----------------------------------------------------------------------
+    # Environment / paths on the appserver
+    # -----------------------------------------------------------------------
+    # Where the script is deployed on the appserver. Logs and CSV reports are
+    # written to logs/ and reports/ beneath it.
+    script_dir: /opt/reset_kibana_state_session
+
+    # System CA bundle that already trusts the corporate Zscaler CA. Used to
+    # verify Kibana's TLS certificate (curl --cacert).
+    ca_bundle: /etc/pki/tls/certs/ca-bundle.crt
+
+    # CA bundle for the AWS CLI's own TLS. AWS CLI v2 ships its own CA list and
+    # ignores the system one, so behind TLS inspection it needs this. Set to ''
+    # to leave the AWS CLI on its built-in list.
+    aws_ca_bundle: "{{ ca_bundle }}"
+
+    # AWS region hosting the agency_*_store / federal_store secrets.
+    aws_region: us-east-1
+
+    # PATH for the script. Set explicitly because sudo on RHEL resets PATH to
+    # /sbin:/bin:/usr/sbin:/usr/bin, which leaves out /usr/local/bin - where
+    # the AWS CLI v2 installer puts `aws`. Prepend any other directory that
+    # holds aws or jq on the appserver.
+    script_path: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+    # The deployment whose secret is federal_store rather than
+    # agency_<agency>_store.
+    fed_deployment: cdm-fed
+
+    # The deployments list that "all" expands to: deployments.txt in the AAP
+    # project checkout on the controller, so the list is version controlled.
+    deployments_file: "{{ playbook_dir }}/../deployments.txt"
+
+    # Seconds one copy of the script may run before it is stopped and reported
+    # as failed.
+    job_timeout_seconds: 3600
+    poll_interval_seconds: 15
+
+    # -----------------------------------------------------------------------
+    # Inputs (typically overridden via AAP survey or -e extra-vars)
+    # -----------------------------------------------------------------------
+    deployments: []
+    run_mode: dry-run                       # dry-run | execute
+    value_mode: set-false                   # set-false | reset-to-default
+    spaces: ''
+    exclude_spaces: ''
+    parallel_jobs: 10
+    verify_ssl: true
+    verbose: false
+    # Write the setting even where it is already false. Not on the survey.
+    force: false
+
+    # Environment for every AWS CLI and script call on the appserver.
+    script_environment: >-
+      {{ {'PATH': script_path,
+          'AWS_REGION': aws_region,
+          'AWS_DEFAULT_REGION': aws_region,
+          'FED_DEPLOYMENT': fed_deployment,
+          'NO_COLOR': '1'}
+         | combine({'AWS_CA_BUNDLE': aws_ca_bundle}
+                   if (aws_ca_bundle | default('', true) | length > 0) else {}) }}
+
+  pre_tasks:
+    # -----------------------------------------------------------------------
+    # Validate and normalise the inputs (on the controller, before touching
+    # the appserver)
+    # -----------------------------------------------------------------------
+    # AAP sends a text answer as a string and a CLI caller may pass a list;
+    # accept both, and treat commas, spaces and new lines alike.
+    - name: Normalise the requested deployments
+      ansible.builtin.set_fact:
+        _deployments_text: >-
+          {{ (deployments | map('string') | join(' '))
+             if (deployments is iterable and deployments is not string and deployments is not mapping)
+             else (deployments | default('', true) | string) }}
+
+    - name: Split the requested deployments into names
+      ansible.builtin.set_fact:
+        _requested: "{{ (_deployments_text | replace(',', ' ')).split() }}"
+        _all_requested: "{{ (_deployments_text | replace(',', ' ')).split() | map('lower') | select('equalto', 'all') | list | length > 0 }}"
+
+    - name: Fail fast when no deployments provided
+      ansible.builtin.fail:
+        msg: >-
+          You must pass a `deployments` variable naming at least one deployment,
+          e.g. "cdm-va, cdm-dos" in the AAP survey or -e deployments=cdm-va on
+          the CLI. Pass "all" to process every deployment listed in
+          deployments.txt.
+      when: _requested | length == 0
+
+    - name: Fail when 'all' is combined with deployment names
+      ansible.builtin.fail:
+        msg: >-
+          "all" means every deployment in deployments.txt and cannot be combined
+          with other names (got: {{ _requested | join(', ') }}). Pass either
+          "all" on its own, or only the deployment names.
+      when: _all_requested | bool and _requested | length > 1
+
+    - name: Validate run_mode value
+      ansible.builtin.fail:
+        msg: "run_mode must be 'dry-run' or 'execute' - got '{{ run_mode }}'."
+      when: run_mode not in ['dry-run', 'execute']
+
+    - name: Validate value_mode value
+      ansible.builtin.fail:
+        msg: "value_mode must be 'set-false' or 'reset-to-default' - got '{{ value_mode }}'."
+      when: value_mode not in ['set-false', 'reset-to-default']
+
+    - name: Resolve 'all' via deployments.txt
+      ansible.builtin.set_fact:
+        resolved_deployments: >-
+          {{ (lookup('ansible.builtin.file', deployments_file).splitlines()
+              | map('regex_replace', '#.*$', '')
+              | join(' ')
+              | replace(',', ' ')).split()
+             | reject('match', '(?i)all$')
+             | unique
+             | list }}
+      when: _all_requested | bool
+
+    - name: Use the deployments named in the request
+      ansible.builtin.set_fact:
+        resolved_deployments: "{{ _requested | unique | list }}"
+      when: not (_all_requested | bool)
+
+    - name: Fail when 'all' expanded to an empty list
+      ansible.builtin.fail:
+        msg: >-
+          "all" was requested but {{ deployments_file }} has no active entries
+          (only blanks / comments). Edit the file to add at least one deployment.
+      when: resolved_deployments | length == 0
+
+    # Names reach a shell command, so only plain deployment names are accepted.
+    - name: Fail on malformed deployment names
+      ansible.builtin.fail:
+        msg: >-
+          Not valid deployment names: {{ _bad_names | join(', ') }}. Use letters,
+          digits, '-', '_' or '.', e.g. cdm-va.
+      vars:
+        _bad_names: "{{ resolved_deployments | reject('match', '^[A-Za-z0-9][A-Za-z0-9._-]*$') | list }}"
+      when: _bad_names | length > 0
+
+    - name: Normalise the space filters
+      ansible.builtin.set_fact:
+        _spaces: >-
+          {{ (((spaces | map('string') | join(' '))
+               if (spaces is iterable and spaces is not string and spaces is not mapping)
+               else (spaces | default('', true) | string)) | replace(',', ' ')).split() | unique | list }}
+        _exclude_spaces: >-
+          {{ (((exclude_spaces | map('string') | join(' '))
+               if (exclude_spaces is iterable and exclude_spaces is not string and exclude_spaces is not mapping)
+               else (exclude_spaces | default('', true) | string)) | replace(',', ' ')).split() | unique | list }}
+
+    - name: Fail on malformed space IDs
+      ansible.builtin.fail:
+        msg: >-
+          Not valid Kibana space IDs: {{ _bad_spaces | join(', ') }}. Space IDs
+          are lowercase letters, digits, '-' and '_' (the ID, not the display
+          name - e.g. "default", not "Default").
+      vars:
+        _bad_spaces: "{{ (_spaces + _exclude_spaces) | reject('match', '^[a-z0-9_-]+$') | list }}"
+      when: _bad_spaces | length > 0
+
+    # A blank optional answer arrives as an empty string; fall back to 10.
+    - name: Resolve the number of parallel jobs
+      ansible.builtin.set_fact:
+        _parallel_requested: "{{ (parallel_jobs | string | trim | length > 0) | ternary(parallel_jobs | string | trim, '10') }}"
+
+    - name: Validate parallel_jobs value
+      ansible.builtin.fail:
+        msg: "parallel_jobs must be a whole number from 1 to 50 - got '{{ _parallel_requested }}'."
+      when: >-
+        _parallel_requested is not match('^[0-9]+$')
+        or (_parallel_requested | int) < 1
+        or (_parallel_requested | int) > 50
+
+    # Contiguous groups, never more groups than deployments (so none is empty).
+    # Each group is one run of the script, so it produces one report.
+    - name: Split the deployments into parallel jobs
+      ansible.builtin.set_fact:
+        deployment_batches: >-
+          {{ resolved_deployments
+             | slice([_parallel_requested | int, resolved_deployments | length] | min)
+             | list }}
+
+    # -----------------------------------------------------------------------
+    # Prepare the appserver
+    # -----------------------------------------------------------------------
+    # Run with the script's own environment, so this finds exactly what the
+    # script will (including the PATH it gets under sudo).
+    - name: Check the tools the script needs are installed on the appserver
+      ansible.builtin.shell:
+        cmd: |
+          missing=''
+          for tool in bash curl jq aws awk; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "not found on $(hostname) with PATH=$PATH:$missing (install them, or add their directory to script_path)" >&2
+            exit 1
+          fi
+        executable: /bin/bash
+      environment: "{{ script_environment }}"
+      changed_when: false
+
+    - name: Check the Kibana CA bundle exists on the appserver
+      ansible.builtin.stat:
+        path: "{{ ca_bundle }}"
+      register: ca_bundle_stat
+      when: verify_ssl | bool
+
+    - name: Fail when the Kibana CA bundle is missing
+      ansible.builtin.fail:
+        msg: >-
+          ca_bundle {{ ca_bundle }} does not exist on the appserver. Set
+          ca_bundle to the system CA bundle path, or verify_ssl to false.
+      when: verify_ssl | bool and not ca_bundle_stat.stat.exists
+
+    - name: Check the AWS CLI CA bundle exists on the appserver
+      ansible.builtin.stat:
+        path: "{{ aws_ca_bundle }}"
+      register: aws_ca_bundle_stat
+      when: aws_ca_bundle | default('', true) | length > 0
+
+    - name: Fail when the AWS CLI CA bundle is missing
+      ansible.builtin.fail:
+        msg: >-
+          aws_ca_bundle {{ aws_ca_bundle }} does not exist on the appserver. Set
+          it to the system CA bundle path, or to '' to use the AWS CLI's own.
+      when: >-
+        aws_ca_bundle | default('', true) | length > 0
+        and not aws_ca_bundle_stat.stat.exists
+
+    # Same pattern as the other toolkits: pushed fresh every run, so the
+    # appserver never drifts from the git version AAP has checked out.
+    - name: Ensure the script directories exist on the appserver
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ script_dir }}", mode: '0755' }
+        - { path: "{{ script_dir }}/logs", mode: '0750' }
+        - { path: "{{ script_dir }}/reports", mode: '0750' }
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Copy the script and its files to the appserver
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ script_dir }}/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "{{ playbook_dir }}/../reset_kibana_state_session.sh", name: reset_kibana_state_session.sh, mode: '0755' }
+        - { src: "{{ playbook_dir }}/../deployments.txt", name: deployments.txt, mode: '0644' }
+        - { src: "{{ playbook_dir }}/files/summarize_report.awk", name: summarize_report.awk, mode: '0644' }
+      loop_control:
+        label: "{{ item.name }}"
+
+    # One timestamp for the whole run, so every artifact this job writes shares
+    # an identifier.
+    - name: Stamp this run
+      ansible.builtin.set_fact:
+        run_ts: "{{ '%Y%m%d_%H%M%S' | strftime }}"
+
+    # Each job writes its own CSV here; they are merged into
+    # reports/reset_<run_ts>.csv at the end and kept, so every path the script
+    # logs stays valid.
+    - name: Create this run's report directory
+      ansible.builtin.file:
+        path: "{{ script_dir }}/reports/{{ run_ts }}"
+        state: directory
+        mode: '0750'
+
+    - name: Announce run mode
+      ansible.builtin.debug:
+        msg: >-
+          {{ _mode_line }} {{ resolved_deployments | length }} deployment(s) in
+          {{ deployment_batches | length }} parallel job(s): {{ resolved_deployments | join(', ') }}
+      vars:
+        _mode_line: >-
+          {{ ('⚠ EXECUTE MODE - state:storeInSessionStorage WILL be '
+              ~ ('reset to default' if value_mode == 'reset-to-default' else 'set to false')
+              ~ ' in ' ~ ('the selected spaces' if _spaces | length > 0 else 'every space') ~ ' of')
+             if run_mode == 'execute'
+             else '🔒 DRY-RUN MODE - no changes will be made. Set run_mode=execute to apply changes. Checking' }}
+
+  tasks:
+    # The command is built with YAML folded style (`>-`) so every line joins
+    # with a single space and Jinja conditionals render as empty when false.
+    # `--` ends the options, so a name can never be read as one. stderr (the
+    # progress log) is merged into stdout so the output keeps its order.
+    - name: Reset state:storeInSessionStorage
+      ansible.builtin.shell:
+        cmd: >-
+          {{ script_dir }}/reset_kibana_state_session.sh
+          {% if run_mode == 'execute' %}--yes{% else %}--dry-run{% endif %}
+          {% if value_mode == 'reset-to-default' %}--reset-to-default{% endif %}
+          {% if force | bool %}--force{% endif %}
+          {% if _spaces | length > 0 %}--spaces {{ _spaces | join(',') | quote }}{% endif %}
+          {% if _exclude_spaces | length > 0 %}--exclude-spaces {{ _exclude_spaces | join(',') | quote }}{% endif %}
+          {% if verify_ssl | bool %}--ca-bundle {{ ca_bundle | quote }}{% else %}--insecure{% endif %}
+          --region {{ aws_region | quote }}
+          {% if verbose | bool %}--verbose{% endif %}
+          --report-csv {{ (script_dir ~ '/reports/' ~ run_ts ~ '/job' ~ (batch_index + 1) ~ '.csv') | quote }}
+          -- {{ item | map('quote') | join(' ') }}
+          2>&1
+        executable: /bin/bash
+        chdir: "{{ script_dir }}"
+      environment: "{{ script_environment }}"
+      loop: "{{ deployment_batches }}"
+      loop_control:
+        index_var: batch_index
+        label: "job {{ batch_index + 1 }}: {{ item | join(', ') }}"
+      async: "{{ job_timeout_seconds | int }}"
+      poll: 0
+      changed_when: false
+      register: reset_jobs
+
+    # failed_when: false so one failed deployment does not stop the play before
+    # the output and summary are shown; the last task fails the job instead.
+    # Polls for 60s longer than job_timeout_seconds (async only checks its time
+    # limit every few seconds), so a job that hits the limit is reported as
+    # timed out rather than abandoned.
+    - name: Wait for the reset jobs to complete
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: reset_results
+      until: reset_results.finished | bool
+      retries: "{{ ((job_timeout_seconds | int + 60) / (poll_interval_seconds | int)) | round(0, 'ceil') | int }}"
+      delay: "{{ poll_interval_seconds | int }}"
+      loop: "{{ reset_jobs.results }}"
+      loop_control:
+        index_var: batch_index
+        label: "job {{ batch_index + 1 }}"
+      failed_when: false
+
+    # Fold every job's output into ONE flat list of plain strings, with a banner
+    # line between jobs, so each message stays a bare line of script output.
+    - name: Fold the job output into a flat list of lines
+      ansible.builtin.set_fact:
+        reset_output_lines: >-
+          {{ (reset_output_lines | default([]))
+             + ['', '════════ job ' ~ (batch_index + 1) ~ ' of ' ~ (reset_results.results | length)
+                    ~ ': ' ~ (item.item.item | join(', ')) ~ ' ════════', '']
+             + (item.stdout_lines | default([]))
+             + ([] if (item.finished | default(0) | bool)
+                else ['job did not finish: ' ~ (item.msg | default('no result'))]) }}
+      loop: "{{ reset_results.results }}"
+      loop_control:
+        index_var: batch_index
+        label: "job {{ batch_index + 1 }}"
+
+    # One file per run holding every job's output. Blank lines are kept here
+    # for readability; they are dropped from the AAP output below.
+    - name: Write the consolidated log to the appserver
+      ansible.builtin.copy:
+        content: "{{ reset_output_lines | join('\n') }}\n"
+        dest: "{{ script_dir }}/logs/reset_{{ run_ts }}.log"
+        mode: '0640'
+
+    # ONE LINE PER EVENT, as in the other toolkits: AAP serialises results as
+    # JSON, so a batched multi-line message renders as one unreadable blob.
+    # `label: " "` suppresses AAP's default (item=<value>) echo.
+    - name: Show reset output
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop: "{{ reset_output_lines | reject('match', '^\\s*$') | list }}"
+      loop_control:
+        label: " "
+
+    # Each job wrote its own CSV; merge them into one report for the run, with
+    # a single header row. Jobs are merged in job order (job1, job2, ... job10).
+    - name: Merge the per-job CSV reports into one
+      ansible.builtin.shell:
+        cmd: |
+          set -eo pipefail
+          parts=()
+          for n in $(seq 1 {{ deployment_batches | length }}); do
+            part={{ (script_dir ~ '/reports/' ~ run_ts) | quote }}/job$n.csv
+            if [ -s "$part" ]; then parts+=("$part"); fi
+          done
+          out={{ (script_dir ~ '/reports/reset_' ~ run_ts ~ '.csv') | quote }}
+          if [ -n "${parts[*]}" ]; then
+            awk 'FNR == 1 && seen { next } FNR == 1 { seen = 1 } { print }' "${parts[@]}" > "$out"
+          else
+            printf 'deployment,space_id,space_name,value_before,action,detail\n' > "$out"
+          fi
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Summarise the run across every job
+      ansible.builtin.command:
+        cmd: >-
+          awk -v mode={{ run_mode | quote }}
+          -f {{ (script_dir ~ '/summarize_report.awk') | quote }}
+          {{ (script_dir ~ '/reports/reset_' ~ run_ts ~ '.csv') | quote }}
+      register: run_summary
+      changed_when: false
+      failed_when: false
+
+    - name: Show the summary
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop: "{{ ((run_summary.stdout_lines | default([]))
+                 + ['Consolidated log: ' ~ script_dir ~ '/logs/reset_' ~ run_ts ~ '.log',
+                    'CSV report:       ' ~ script_dir ~ '/reports/reset_' ~ run_ts ~ '.csv'])
+                | reject('match', '^\\s*$') | list }}"
+      loop_control:
+        label: " "
+
+    - name: Report failed jobs (rc != 0)
+      ansible.builtin.debug:
+        msg: "Job {{ batch_index + 1 }} ({{ item.item.item | join(', ') }}) {{ _why }}"
+      vars:
+        _why: >-
+          {{ ('failed with rc=' ~ item.rc
+              ~ {1: ' - at least one deployment or space failed; see the summary above',
+                 2: ' - the script rejected its arguments'}.get(item.rc | int, ''))
+             if item.rc is defined
+             else ('did not finish: ' ~ (item.msg | default('no result'))) }}
+      when: (item.rc | default(-1)) != 0
+      loop: "{{ reset_results.results }}"
+      loop_control:
+        index_var: batch_index
+        label: "job {{ batch_index + 1 }}"
+
+    - name: Fail the job if any deployment or space failed
+      ansible.builtin.fail:
+        msg: >-
+          {{ _failed_jobs | length }} of {{ reset_results.results | length }} job(s)
+          did not complete cleanly. See the summary and the failed rows above.
+      vars:
+        _failed_jobs: "{{ reset_results.results | rejectattr('rc', 'defined') | list
+                          + (reset_results.results | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list) }}"
+      when: _failed_jobs | length > 0
