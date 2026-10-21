@@ -40,6 +40,12 @@ from AAP, with a survey for the inputs. [docs/aap-setup.md](docs/aap-setup.md)
 walks through creating the project, inventory, credential, job template and
 survey; `aap/survey_spec.json` holds the survey for import through the API.
 
+The survey's **Deployments** and **Exclude deployments** questions are
+multiple-select, so they list every deployment as an option. Those options are
+generated from `deployments.txt`: after changing the file, run
+`python3 aap/build_survey_spec.py` and upload the result (see
+[Updating the deployment list](docs/aap-setup.md#updating-the-deployment-list)).
+
 | Path | What |
 | --- | --- |
 | `reset_kibana_state_session.sh` | The script |
@@ -47,7 +53,8 @@ survey; `aap/survey_spec.json` holds the survey for import through the API.
 | `playbooks/reset_kibana_state_session.yml` | AAP playbook (runs on the `appserver` group) |
 | `playbooks/files/summarize_report.awk` | Summarises the run's CSV across every deployment |
 | `inventory/hosts.yml` | Example inventory with the `appserver` group |
-| `aap/survey_spec.json` | The job template survey |
+| `aap/survey_spec.json` | The job template survey (generated) |
+| `aap/build_survey_spec.py` | Generates the survey from `deployments.txt` |
 | `docs/aap-setup.md` | AAP setup, step by step |
 | `tests/` | Test suites for the script and the playbook |
 
@@ -132,8 +139,14 @@ KIBANA_URL_TEMPLATE='https://kibana.{{deployment}}.example.gov' \
 # A different list, unattended, with a CSV report for the change record
 ./reset_kibana_state_session.sh --file prod.txt --yes --report-csv reset-report.csv all
 
+# Everything except some deployments
+./reset_kibana_state_session.sh --exclude-deployments cdm-tva,cdm-dos all
+
 # Only the master spaces, everywhere
 ./reset_kibana_state_session.sh --spaces master all
+
+# Every space except some
+./reset_kibana_state_session.sh --exclude-spaces 'default, admin, infra' all
 ```
 
 ### Choosing deployments
@@ -145,8 +158,16 @@ KIBANA_URL_TEMPLATE='https://kibana.{{deployment}}.example.gov' \
 | nothing | Same as `all` |
 
 `all` is a wildcard, not a deployment name. It is case-insensitive (`ALL` and
-`All` work too) and cannot be mixed with names: `all cdm-va` is rejected with
-exit status `2` before anything runs, rather than guessing which you meant.
+`All` work too) and on the command line cannot be mixed with names: `all
+cdm-va` is rejected with exit status `2` before anything runs, rather than
+guessing which you meant. (In the AAP survey, where these are tick-boxes,
+ticking `all` alongside individual deployments is accepted and means `all`.)
+
+`--exclude-deployments LIST` leaves deployments out of whichever list was
+chosen — `all` or named ones. Names are separated by commas or spaces
+(`cdm-va,cdm-dos` or `'cdm-va, cdm-dos'`). An excluded name that is not in the
+list is reported and otherwise ignored; excluding every deployment, or
+excluding `all`, is rejected with exit status `2`.
 
 ### The deployments file
 
@@ -169,7 +190,8 @@ Full flag list: `./reset_kibana_state_session.sh --help`.
 | `--reset-to-default` | Send `{"value": null}` — removes the override, exactly like the UI's *Reset to default* — instead of writing an explicit `false` |
 | `--force` | Write even where the value is already false |
 | `-s, --spaces LIST` | Only these space ids (comma separated) |
-| `-x, --exclude-spaces LIST` | Skip these space ids |
+| `-x, --exclude-spaces LIST` | Skip these space ids (comma separated; spaces after commas are fine) |
+| `--exclude-deployments LIST` | Leave these deployments out (comma or space separated) |
 | `--report-csv PATH` | Also write the report as CSV |
 | `--profile` / `--region` | Passed through to the AWS CLI |
 | `--timeout` / `--retries` | Per-request timeout and attempt count |

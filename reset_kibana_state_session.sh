@@ -71,6 +71,7 @@ CA_BUNDLE="${CA_BUNDLE:-}"
 REPORT_CSV=""
 SPACE_INCLUDE=""
 SPACE_EXCLUDE=""
+DEPLOYMENT_EXCLUDE=""
 
 # AWS passthrough
 AWS_PROFILE_OPT="${AWS_PROFILE_OPT:-}"
@@ -152,6 +153,9 @@ For each deployment the script:
 
 OPTIONS
     -f, --file PATH        Deployments file used by '${ALL_KEYWORD}' (default: deployments.txt)
+        --exclude-deployments LIST
+                           Leave these deployments out (separated by commas
+                           or spaces). Works with '${ALL_KEYWORD}' and with named ones
     -n, --dry-run          Report what would change; make no changes
         --reset-to-default Send {"value": null} (removes the override, i.e. the
                            UI's "Reset to default") instead of an explicit false
@@ -192,6 +196,7 @@ EXAMPLES
     ${SCRIPT_NAME} cdm-va cdm-fed
     ${SCRIPT_NAME} --yes --report-csv /tmp/reset-report.csv ${ALL_KEYWORD}
     ${SCRIPT_NAME} --file prod-deployments.txt ${ALL_KEYWORD}
+    ${SCRIPT_NAME} --exclude-deployments cdm-tva,cdm-dos ${ALL_KEYWORD}
     ${SCRIPT_NAME} --spaces default,master cdm-dos
 HELP_EOF
 }
@@ -211,6 +216,7 @@ while (($#)); do
         --force)               FORCE=true; shift ;;
         -s|--spaces)           [[ $# -ge 2 ]] || usage_error "$1 needs a value"; SPACE_INCLUDE="$2"; shift 2 ;;
         -x|--exclude-spaces)   [[ $# -ge 2 ]] || usage_error "$1 needs a value"; SPACE_EXCLUDE="$2"; shift 2 ;;
+        --exclude-deployments) [[ $# -ge 2 ]] || usage_error "$1 needs a value"; DEPLOYMENT_EXCLUDE="$2"; shift 2 ;;
         --report-csv)          [[ $# -ge 2 ]] || usage_error "$1 needs a value"; REPORT_CSV="$2"; shift 2 ;;
         --profile)             [[ $# -ge 2 ]] || usage_error "$1 needs a value"; AWS_PROFILE_OPT="$2"; shift 2 ;;
         --region)              [[ $# -ge 2 ]] || usage_error "$1 needs a value"; AWS_REGION_OPT="$2"; shift 2 ;;
@@ -818,6 +824,50 @@ else
     else
         log_info "no deployments named; read ${#DEPLOYMENTS[@]} deployment(s) from $DEPLOYMENTS_FILE"
     fi
+fi
+
+# Leave out any --exclude-deployments, from whichever list was chosen above.
+if [[ -n "$DEPLOYMENT_EXCLUDE" ]]; then
+    declare -a EXCLUDE_WORDS=() KEPT_DEPLOYMENTS=() EXCLUDED_DEPLOYMENTS=()
+    while IFS= read -r word; do
+        [[ -n "$word" ]] || continue
+        if is_all_keyword "$word"; then
+            usage_error "--exclude-deployments cannot contain '$ALL_KEYWORD': that would leave nothing to do"
+        fi
+        EXCLUDE_WORDS+=("$word")
+    done < <(split_words "$DEPLOYMENT_EXCLUDE")
+    ((${#EXCLUDE_WORDS[@]} > 0)) || usage_error "--exclude-deployments names no deployments"
+
+    for deployment in "${DEPLOYMENTS[@]}"; do
+        excluded=false
+        for word in "${EXCLUDE_WORDS[@]}"; do
+            if [[ "$deployment" == "$word" ]]; then excluded=true; fi
+        done
+        if [[ "$excluded" == true ]]; then
+            EXCLUDED_DEPLOYMENTS+=("$deployment")
+        else
+            KEPT_DEPLOYMENTS+=("$deployment")
+        fi
+    done
+
+    # A name that matched nothing is most likely a typo; say so, but carry on.
+    for word in "${EXCLUDE_WORDS[@]}"; do
+        found=false
+        for deployment in "${DEPLOYMENTS[@]}"; do
+            if [[ "$deployment" == "$word" ]]; then found=true; fi
+        done
+        if [[ "$found" != true ]]; then
+            log_warn "--exclude-deployments: '$word' is not in the deployment list, so there is nothing to exclude"
+        fi
+    done
+
+    ((${#KEPT_DEPLOYMENTS[@]} > 0)) ||
+        usage_error "--exclude-deployments excludes every deployment in the list - nothing to do"
+    if ((${#EXCLUDED_DEPLOYMENTS[@]} > 0)); then
+        log_info "excluding ${#EXCLUDED_DEPLOYMENTS[@]} deployment(s): ${EXCLUDED_DEPLOYMENTS[*]}"
+    fi
+    DEPLOYMENTS=("${KEPT_DEPLOYMENTS[@]}")
+    log_info "${#DEPLOYMENTS[@]} deployment(s) to process"
 fi
 
 # Changing settings needs a yes: from the prompt when run interactively, or

@@ -22,10 +22,14 @@
 #   means every targeted space ended up false.
 #
 # Survey inputs (docs/aap-setup.md has the full survey):
-#   deployments     required. Names separated by commas, spaces or new lines,
-#                   e.g. "cdm-va, cdm-dos", or "all" for every deployment in
-#                   deployments.txt. "all" cannot be combined with names. A list
-#                   also works: -e '{"deployments": ["cdm-va", "cdm-dos"]}'.
+#   deployments     required. A list, as an AAP multiple-select question sends
+#                   it (["cdm-va", "cdm-dos"]), or text separated by commas,
+#                   spaces or new lines ("cdm-va, cdm-dos"). "all" means every
+#                   deployment in deployments.txt; names ticked alongside it are
+#                   already included.
+#   exclude_deployments
+#                   optional. Deployments to leave out, in the same forms.
+#                   Applied after "all" is expanded.
 #   run_mode        dry-run | execute. Default dry-run.
 #   value_mode      set-false | reset-to-default. Default set-false.
 #   spaces          optional. Only these space IDs, e.g. "default, master".
@@ -84,6 +88,7 @@
     # Inputs (typically overridden via AAP survey or -e extra-vars)
     # -----------------------------------------------------------------------
     deployments: []
+    exclude_deployments: []
     run_mode: dry-run                       # dry-run | execute
     value_mode: set-false                   # set-false | reset-to-default
     spaces: ''
@@ -109,8 +114,8 @@
     # Validate and normalise the inputs (on the controller, before touching
     # the appserver)
     # -----------------------------------------------------------------------
-    # AAP sends a text answer as a string and a CLI caller may pass a list;
-    # accept both, and treat commas, spaces and new lines alike.
+    # An AAP multiple-select answer arrives as a list and a text answer as a
+    # string; accept both, and treat commas, spaces and new lines alike.
     - name: Normalise the requested deployments
       ansible.builtin.set_fact:
         _deployments_text: >-
@@ -122,23 +127,27 @@
       ansible.builtin.set_fact:
         _requested: "{{ (_deployments_text | replace(',', ' ')).split() }}"
         _all_requested: "{{ (_deployments_text | replace(',', ' ')).split() | map('lower') | select('equalto', 'all') | list | length > 0 }}"
+        _named: "{{ (_deployments_text | replace(',', ' ')).split() | reject('match', '(?i)all$') | unique | list }}"
+        _excluded: >-
+          {{ (((exclude_deployments | map('string') | join(' '))
+               if (exclude_deployments is iterable and exclude_deployments is not string and exclude_deployments is not mapping)
+               else (exclude_deployments | default('', true) | string)) | replace(',', ' ')).split() | unique | list }}
 
     - name: Fail fast when no deployments provided
       ansible.builtin.fail:
         msg: >-
           You must pass a `deployments` variable naming at least one deployment,
-          e.g. "cdm-va, cdm-dos" in the AAP survey or -e deployments=cdm-va on
-          the CLI. Pass "all" to process every deployment listed in
+          e.g. 'cdm-va, cdm-dos' in the AAP survey or -e deployments=cdm-va on
+          the CLI. Pass 'all' to process every deployment listed in
           deployments.txt.
       when: _requested | length == 0
 
-    - name: Fail when 'all' is combined with deployment names
+    - name: Fail when 'all' is among the deployments to exclude
       ansible.builtin.fail:
         msg: >-
-          "all" means every deployment in deployments.txt and cannot be combined
-          with other names (got: {{ _requested | join(', ') }}). Pass either
-          "all" on its own, or only the deployment names.
-      when: _all_requested | bool and _requested | length > 1
+          exclude_deployments cannot contain 'all' - that would leave nothing to
+          do. List the deployments to leave out.
+      when: _excluded | map('lower') | select('equalto', 'all') | list | length > 0
 
     - name: Validate run_mode value
       ansible.builtin.fail:
@@ -150,9 +159,12 @@
         msg: "value_mode must be 'set-false' or 'reset-to-default' - got '{{ value_mode }}'."
       when: value_mode not in ['set-false', 'reset-to-default']
 
+    # Names ticked alongside "all" are normally in the file already; any that
+    # are not (a survey choice newer than the file) are added after it, so
+    # nothing explicitly chosen is dropped.
     - name: Resolve 'all' via deployments.txt
       ansible.builtin.set_fact:
-        resolved_deployments: >-
+        _from_file: >-
           {{ (lookup('ansible.builtin.file', deployments_file).splitlines()
               | map('regex_replace', '#.*$', '')
               | join(' ')
@@ -162,16 +174,34 @@
              | list }}
       when: _all_requested | bool
 
-    - name: Use the deployments named in the request
-      ansible.builtin.set_fact:
-        resolved_deployments: "{{ _requested | unique | list }}"
-      when: not (_all_requested | bool)
-
     - name: Fail when 'all' expanded to an empty list
       ansible.builtin.fail:
         msg: >-
-          "all" was requested but {{ deployments_file }} has no active entries
+          'all' was requested but {{ deployments_file }} has no active entries
           (only blanks / comments). Edit the file to add at least one deployment.
+      when: _all_requested | bool and _from_file | length == 0
+
+    - name: Combine 'all' with any other deployments ticked
+      ansible.builtin.set_fact:
+        _selected: "{{ _from_file + (_named | reject('in', _from_file) | list) }}"
+      when: _all_requested | bool
+
+    - name: Use the deployments named in the request
+      ansible.builtin.set_fact:
+        _selected: "{{ _named }}"
+      when: not (_all_requested | bool)
+
+    - name: Apply exclude_deployments
+      ansible.builtin.set_fact:
+        resolved_deployments: "{{ _selected | reject('in', _excluded) | list }}"
+        excluded_deployments: "{{ _selected | select('in', _excluded) | list }}"
+        _excluded_not_selected: "{{ _excluded | reject('in', _selected) | list }}"
+
+    - name: Fail when every deployment is excluded
+      ansible.builtin.fail:
+        msg: >-
+          exclude_deployments leaves nothing to do: all {{ _selected | length }}
+          selected deployment(s) are excluded ({{ excluded_deployments | join(', ') }}).
       when: resolved_deployments | length == 0
 
     # Names reach a shell command, so only plain deployment names are accepted.
@@ -181,7 +211,7 @@
           Not valid deployment names: {{ _bad_names | join(', ') }}. Use letters,
           digits, '-', '_' or '.', e.g. cdm-va.
       vars:
-        _bad_names: "{{ resolved_deployments | reject('match', '^[A-Za-z0-9][A-Za-z0-9._-]*$') | list }}"
+        _bad_names: "{{ (_selected + _excluded) | unique | reject('match', '^[A-Za-z0-9][A-Za-z0-9._-]*$') | list }}"
       when: _bad_names | length > 0
 
     - name: Normalise the space filters
@@ -200,7 +230,7 @@
         msg: >-
           Not valid Kibana space IDs: {{ _bad_spaces | join(', ') }}. Space IDs
           are lowercase letters, digits, '-' and '_' (the ID, not the display
-          name - e.g. "default", not "Default").
+          name - e.g. 'default', not 'Default').
       vars:
         _bad_spaces: "{{ (_spaces + _exclude_spaces) | reject('match', '^[a-z0-9_-]+$') | list }}"
       when: _bad_spaces | length > 0
@@ -328,6 +358,19 @@
               ~ ' in ' ~ ('the selected spaces' if _spaces | length > 0 else 'every space') ~ ' of')
              if run_mode == 'execute'
              else '🔒 DRY-RUN MODE - no changes will be made. Set run_mode=execute to apply changes. Checking' }}
+
+    - name: Announce excluded deployments
+      ansible.builtin.debug:
+        msg: "Excluding {{ excluded_deployments | length }} deployment(s): {{ excluded_deployments | join(', ') }}"
+      when: excluded_deployments | length > 0
+
+    # Most likely a typo, or a deployment not ticked in the first place.
+    - name: Warn about exclusions that matched nothing
+      ansible.builtin.debug:
+        msg: >-
+          exclude_deployments names deployment(s) that were not selected, so
+          excluding them had no effect: {{ _excluded_not_selected | join(', ') }}
+      when: _excluded_not_selected | length > 0
 
   tasks:
     # The command is built with YAML folded style (`>-`) so every line joins

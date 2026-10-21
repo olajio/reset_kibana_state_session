@@ -171,7 +171,9 @@ validation_case() {  # validation_case <label> <expected message> <ansible args.
 }
 validation_case no_deployments  'variable naming at least one deployment' -e 'deployments='
 validation_case blank_list      'variable naming at least one deployment' -e '{"deployments": []}'
-validation_case all_mixed       'cannot be combined with other names'     -e 'deployments="all, cdm-va"'
+validation_case excl_all_word   "exclude_deployments cannot contain 'all'" -e '{"deployments": ["all"], "exclude_deployments": ["all"]}'
+validation_case excl_everything 'exclude_deployments leaves nothing to do' -e '{"deployments": ["all"], "exclude_deployments": ["cdm-va", "cdm-dos"]}'
+validation_case excl_bad_name   'Not valid deployment names'              -e '{"deployments": ["all"], "exclude_deployments": ["cdm-dos;rm"]}'
 validation_case bad_run_mode    "run_mode must be 'dry-run' or 'execute'" -e deployments=cdm-va -e run_mode=go
 validation_case bad_value_mode  "value_mode must be 'set-false' or"       -e deployments=cdm-va -e value_mode=zero
 validation_case bad_name        'Not valid deployment names'              -e 'deployments="cdm-va;touch /tmp/x"'
@@ -247,6 +249,55 @@ run_pb all_upper -e deployments=ALL -e "deployments_file=$WORK_DIR/all.txt"
 check_contains "'ALL' works too" '3 deployment(s) in 3 parallel job(s)'
 
 # ==========================================================================
+printf '\nTest: multiple-select answers (lists), as the survey sends them\n'
+run_pb ms_all -e '{"deployments": ["all"]}'
+check_rc "[\"all\"] works" 0
+check_contains "[\"all\"] reads deployments.txt" '2 deployment(s) in 2 parallel job(s): cdm-va, cdm-dos'
+
+run_pb ms_all_plus -e '{"deployments": ["all", "cdm-va"]}'
+check_rc "'all' ticked with a name is accepted" 0
+check_contains "a name already in the file adds nothing" '2 deployment(s) in 2 parallel job(s): cdm-va, cdm-dos'
+
+run_pb ms_all_extra -e '{"deployments": ["all", "cdm-fed"]}'
+check_contains "a ticked name not in the file is added after it" '3 deployment(s) in 3 parallel job(s): cdm-va, cdm-dos, cdm-fed'
+
+run_pb ms_names -e '{"deployments": ["cdm-dos", "cdm-va"]}'
+check_contains "ticked names kept in order" '2 deployment(s) in 2 parallel job(s): cdm-dos, cdm-va'
+
+# ==========================================================================
+printf '\nTest: exclude_deployments\n'
+run_pb excl_list -e '{"deployments": ["all"], "exclude_deployments": ["cdm-dos"]}'
+check_rc "excluding from 'all' works" 0
+check_contains "exclusion announced"          'Excluding 1 deployment(s): cdm-dos'
+check_contains "excluded deployment removed"  '1 deployment(s) in 1 parallel job(s): cdm-va'
+check_absent   "excluded deployment never run" '=== cdm-dos ==='
+
+run_pb excl_text -e '{"deployments": ["all", "cdm-fed"], "exclude_deployments": "cdm-va, cdm-dos"}'
+check_contains "text exclusion with ', '" 'Excluding 2 deployment(s): cdm-va, cdm-dos'
+check_contains "only cdm-fed left"         '1 deployment(s) in 1 parallel job(s): cdm-fed'
+
+run_pb excl_text_comma -e deployments=all -e 'exclude_deployments=cdm-va,cdm-dos' -e "deployments_file=$WORK_DIR/all.txt"
+check_contains "text exclusion with ','"   '1 deployment(s) in 1 parallel job(s): cdm-fed'
+
+run_pb excl_unmatched -e '{"deployments": ["cdm-va"], "exclude_deployments": ["cdm-dos"]}'
+check_rc "an exclusion that matches nothing still runs" 0
+check_contains "unmatched exclusion warned" 'excluding them had no effect: cdm-dos'
+
+run_pb excl_blank -e '{"deployments": ["cdm-va"], "exclude_deployments": ""}'
+check_rc "a blank exclusion is ignored" 0
+check_absent "nothing announced as excluded" 'Excluding'
+
+# ==========================================================================
+printf '\nTest: Skip spaces accepts comma separated IDs, with or without spaces\n'
+for form in 'default,admin,infra' 'default, admin, infra'; do
+    run_pb "skip_${form//[^a-z]/_}" -e deployments=cdm-va -e "{\"exclude_spaces\": \"$form\"}"
+    check_rc "'$form' accepted" 0
+    check_contains "'$form': passed to the script"  'excluded by --exclude-spaces'
+    check_contains "'$form': exactly one space (default) skipped" 'spaces skipped            : 1'
+    check_contains "'$form': other spaces still processed" 'cdm-va/master: already false'
+done
+
+# ==========================================================================
 printf '\nTest: other input forms and options\n'
 run_pb list_input -e '{"deployments": ["cdm-dos"]}'
 check_rc "a list of deployments works" 0
@@ -297,7 +348,7 @@ check_contains "timeout reported for the job" 'did not finish'
 check_contains "job marked failed"            '1 of 1 job(s) did not complete cleanly'
 
 # ==========================================================================
-printf '\nTest: the AAP survey spec matches the playbook\n'
+printf '\nTest: the AAP survey spec matches the playbook and deployments.txt\n'
 SURVEY="$REPO_DIR/aap/survey_spec.json"
 OUT="$WORK_DIR/survey-check.out"
 if python3 - "$SURVEY" "$PLAYBOOK" > "$OUT" 2>&1 <<'PY'
@@ -311,29 +362,73 @@ for q in spec:
         problems.append("%s: not a variable in the playbook's vars" % var)
     if kind == "multiplechoice" and q["default"] not in q["choices"]:
         problems.append("%s: default %r is not one of %r" % (var, q["default"], q["choices"]))
+    if kind == "multiselect":
+        if not isinstance(q["choices"], list) or not q["choices"]:
+            problems.append("%s: multiselect without choices" % var)
+        elif q["default"] not in ("", None) and q["default"] not in q["choices"]:
+            problems.append("%s: default %r is not one of the choices" % (var, q["default"]))
     if kind == "integer" and not (q["min"] <= q["default"] <= q["max"]):
         problems.append("%s: default outside min/max" % var)
     for key in ("question_name", "required", "type", "variable", "default"):
         if key not in q:
             problems.append("%s: missing %s" % (var, key))
+by_var = {q["variable"]: q for q in spec}
+if by_var.get("deployments", {}).get("type") != "multiselect" or "all" not in by_var["deployments"]["choices"]:
+    problems.append("deployments: should be multiselect offering 'all'")
+if "all" in by_var.get("exclude_deployments", {}).get("choices", []):
+    problems.append("exclude_deployments: must not offer 'all'")
 print("\n".join(problems) or "ok")
 sys.exit(1 if problems else 0)
 PY
 then pass "survey spec is valid and every variable exists in the playbook"; else fail "survey spec problems"; fi
 
-# What AAP sends: every answer as typed (multiple choice as strings, blank
-# optional text as ""), with the deployments typed into the textarea.
-python3 - "$SURVEY" "$WORK_DIR/survey-vars.json" <<'PY'
+OUT="$WORK_DIR/survey-sync.out"
+if python3 "$REPO_DIR/aap/build_survey_spec.py" --check > "$OUT" 2>&1; then
+    pass "survey_spec.json is up to date with deployments.txt"
+else
+    fail "survey_spec.json is stale: run python3 aap/build_survey_spec.py"
+fi
+
+# What AAP sends: multiple-select answers as lists, multiple choice as strings,
+# blank optional text as "". Answers are picked from the spec's own choices,
+# as AAP only allows those.
+survey_answers() {  # survey_answers <out.json> <deployments...> -- <excluded...>
+    python3 - "$SURVEY" "$@" <<'PY'
 import json, sys
 spec = json.load(open(sys.argv[1]))["spec"]
-answers = {q["variable"]: q["default"] for q in spec}
-answers["deployments"] = "cdm-va\ncdm-dos\n"
-json.dump(answers, open(sys.argv[2], "w"))
+out, rest = sys.argv[2], sys.argv[3:]
+split = rest.index("--")
+picked = {"deployments": rest[:split], "exclude_deployments": rest[split + 1:]}
+answers = {}
+for q in spec:
+    if q["type"] == "multiselect":
+        value = picked[q["variable"]]
+        bad = [v for v in value if v not in q["choices"]]
+        if bad:
+            sys.exit("AAP would reject %s for %s: not among the choices" % (bad, q["variable"]))
+        if value or q["required"]:
+            answers[q["variable"]] = value
+    else:
+        answers[q["variable"]] = q["default"]
+json.dump(answers, open(out, "w"))
 PY
-run_pb survey_defaults -e "@$WORK_DIR/survey-vars.json"
-check_rc "survey defaults run cleanly" 0
+}
+
+survey_answers "$WORK_DIR/survey-names.json" cdm-va cdm-dos --
+run_pb survey_names -e "@$WORK_DIR/survey-names.json"
+check_rc "survey: two deployments ticked" 0
 check_contains "survey defaults are a dry run" 'DRY-RUN MODE'
-check_contains "survey textarea answer parsed" '2 deployment(s) in 2 parallel job(s): cdm-va, cdm-dos'
+check_contains "survey: ticked deployments used" '2 deployment(s) in 2 parallel job(s): cdm-va, cdm-dos'
+
+survey_answers "$WORK_DIR/survey-all-excl.json" all -- cdm-dos
+run_pb survey_all_excl -e "@$WORK_DIR/survey-all-excl.json"
+check_rc "survey: 'all' with one excluded" 0
+check_contains "survey: exclusion applied" 'Excluding 1 deployment(s): cdm-dos'
+check_contains "survey: the rest processed" '1 deployment(s) in 1 parallel job(s): cdm-va'
+
+survey_answers "$WORK_DIR/survey-all-plus.json" all cdm-va --
+run_pb survey_all_plus -e "@$WORK_DIR/survey-all-plus.json"
+check_rc "survey: 'all' ticked with a deployment" 0
 
 # ==========================================================================
 printf '\nTest: no credentials in any output\n'

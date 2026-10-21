@@ -4,14 +4,37 @@
   "spec": [
     {
       "question_name": "Deployments",
-      "question_description": "Deployment names separated by commas, spaces or new lines (e.g. cdm-va, cdm-fed), or all for every deployment in deployments.txt. all cannot be combined with names.",
+      "question_description": "Tick 'all' for every deployment in deployments.txt, or tick individual deployments. Deployments ticked alongside 'all' are already included.",
       "required": true,
-      "type": "textarea",
+      "type": "multiselect",
       "variable": "deployments",
-      "min": 1,
-      "max": 10000,
+      "min": null,
+      "max": null,
       "default": "",
-      "choices": "",
+      "choices": [
+        "all",
+        "cdm-fed",
+        "cdm-va",
+        "cdm-dos",
+        "cdm-tva"
+      ],
+      "new_question": true
+    },
+    {
+      "question_name": "Exclude deployments",
+      "question_description": "Optional. Deployments to leave out, e.g. when 'all' is ticked.",
+      "required": false,
+      "type": "multiselect",
+      "variable": "exclude_deployments",
+      "min": null,
+      "max": null,
+      "default": "",
+      "choices": [
+        "cdm-fed",
+        "cdm-va",
+        "cdm-dos",
+        "cdm-tva"
+      ],
       "new_question": true
     },
     {
@@ -23,7 +46,10 @@
       "min": null,
       "max": null,
       "default": "dry-run",
-      "choices": ["dry-run", "execute"],
+      "choices": [
+        "dry-run",
+        "execute"
+      ],
       "new_question": true
     },
     {
@@ -35,12 +61,15 @@
       "min": null,
       "max": null,
       "default": "set-false",
-      "choices": ["set-false", "reset-to-default"],
+      "choices": [
+        "set-false",
+        "reset-to-default"
+      ],
       "new_question": true
     },
     {
-      "question_name": "Only these spaces (optional)",
-      "question_description": "Kibana space IDs to limit the run to, separated by commas or spaces (e.g. default, master). Leave blank for every space.",
+      "question_name": "Spaces",
+      "question_description": "Optional. Only these Kibana space IDs, separated by commas (e.g. default,admin or default, admin). Leave blank for every space.",
       "required": false,
       "type": "text",
       "variable": "spaces",
@@ -51,8 +80,8 @@
       "new_question": true
     },
     {
-      "question_name": "Skip these spaces (optional)",
-      "question_description": "Kibana space IDs to leave alone, separated by commas or spaces. Leave blank to skip none.",
+      "question_name": "Skip spaces",
+      "question_description": "Optional. Kibana space IDs to leave alone, separated by commas (e.g. default,admin,infra or default, admin, infra). Leave blank to skip none.",
       "required": false,
       "type": "text",
       "variable": "exclude_spaces",
@@ -75,7 +104,7 @@
       "new_question": true
     },
     {
-      "question_name": "Verify Kibana TLS certificates",
+      "question_name": "Verify Kibana TLS",
       "question_description": "Keep true. false skips certificate checks for Kibana (last resort).",
       "required": true,
       "type": "multiplechoice",
@@ -83,7 +112,10 @@
       "min": null,
       "max": null,
       "default": "true",
-      "choices": ["true", "false"],
+      "choices": [
+        "true",
+        "false"
+      ],
       "new_question": true
     },
     {
@@ -95,7 +127,10 @@
       "min": null,
       "max": null,
       "default": "false",
-      "choices": ["false", "true"],
+      "choices": [
+        "false",
+        "true"
+      ],
       "new_question": true
     }
   ]

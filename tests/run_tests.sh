@@ -341,6 +341,45 @@ check_contains "--file with named deployments warns" "is ignored because deploym
 check_contains "named deployment used"                "using 1 deployment(s) from the command line"
 
 # ==========================================================================
+printf '\nTest: --exclude-deployments\n'
+printf 'cdm-va\ncdm-dos\ncdm-fed\n' > "$WORK_DIR/three.txt"
+
+run excl_all --dry-run --file "$WORK_DIR/three.txt" --exclude-deployments cdm-dos all
+check_rc "excluding from 'all' exits 0" 0
+check_contains "exclusion announced"          'excluding 1 deployment(s): cdm-dos'
+check_contains "remaining count announced"    '2 deployment(s) to process'
+check_contains "kept deployment processed"    '=== cdm-va ==='
+check_absent   "excluded deployment skipped"  '=== cdm-dos ==='
+
+run excl_commaspace --dry-run --file "$WORK_DIR/three.txt" --exclude-deployments 'cdm-va, cdm-fed' all
+check_contains "'a, b' form excludes both"    'excluding 2 deployment(s): cdm-va cdm-fed'
+check_contains "only cdm-dos left"            '1 deployment(s) to process'
+
+run excl_comma --dry-run --file "$WORK_DIR/three.txt" --exclude-deployments cdm-va,cdm-fed all
+check_contains "'a,b' form excludes both"     'excluding 2 deployment(s): cdm-va cdm-fed'
+
+run excl_named --dry-run --exclude-deployments cdm-va cdm-va cdm-dos
+check_rc "excluding from named deployments exits 0" 0
+check_contains "named list minus exclusion"   'excluding 1 deployment(s): cdm-va'
+check_absent   "excluded named deployment skipped" '=== cdm-va ==='
+
+run excl_unknown --dry-run --file "$WORK_DIR/three.txt" --exclude-deployments cdm-nosuch all
+check_rc "unknown exclusion still runs" 0
+check_contains "unknown exclusion warned"     "'cdm-nosuch' is not in the deployment list"
+
+calls_before="$(aws_call_count)"
+run excl_everything --dry-run --file "$WORK_DIR/three.txt" --exclude-deployments cdm-va,cdm-dos,cdm-fed all
+check_rc "excluding everything exits 2" 2
+check_contains "excluding everything explained" 'excludes every deployment in the list - nothing to do'
+run excl_allword --dry-run --file "$WORK_DIR/three.txt" --exclude-deployments all all
+check_rc "excluding 'all' exits 2" 2
+run excl_empty --dry-run --exclude-deployments ', ' cdm-va
+check_rc "an exclusion naming nothing exits 2" 2
+run excl_novalue --dry-run cdm-va --exclude-deployments
+check_rc "--exclude-deployments with no value exits 2" 2
+if [[ "$(aws_call_count)" == "$calls_before" ]]; then pass "rejected exclusions read no secrets"; else fail "rejected exclusions read secrets"; fi
+
+# ==========================================================================
 printf '\nTest: cdm-fed maps to federal_store\n'
 run fed --yes --dry-run cdm-fed
 check_contains "fed secret name" "secret 'federal_store'"

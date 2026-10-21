@@ -7,6 +7,11 @@
 #   cdm-fed       -> federal_store
 #   cdm-<agency>  -> agency_<agency>_store
 #
+# After changing this list, regenerate the AAP survey so its Deployments and
+# Exclude deployments options match:   python3 aap/build_survey_spec.py
+# then upload aap/survey_spec.json (docs/aap-setup.md, "Updating the
+# deployment list").
+#
 # Replace the entries below with your real deployment list.
 
 cdm-fed

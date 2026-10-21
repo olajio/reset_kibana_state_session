@@ -12,9 +12,9 @@ are the same in both.
 1. You launch the job template and answer the survey.
 2. AAP checks out this repository (the project) and runs
    `playbooks/reset_kibana_state_session.yml`.
-3. On the AAP side the playbook validates your answers and, for `all`, expands
-   the list from `deployments.txt` in the checkout. Nothing reaches the
-   appserver until the inputs are valid.
+3. On the AAP side the playbook validates your answers, expands `all` to every
+   deployment in `deployments.txt` in the checkout, and removes any you chose
+   to exclude. Nothing reaches the appserver until the inputs are valid.
 4. Over SSH with sudo (the Machine credential), it copies the script to
    `/opt/reset_kibana_state_session` on the appserver.
 5. It splits the deployments across up to *Parallel jobs* copies of the script,
@@ -227,36 +227,104 @@ The values shown are the defaults.
 
 ## Step 5 — Add the survey
 
-Open the template, go to the **Survey** tab, and add these eight questions in
-this order. ("Answer variable name" must be exactly as shown — the playbook
-reads those names.)
+The survey has nine questions. **Deployments** and **Exclude deployments** are
+multiple-select, so every deployment has to be listed in the survey as an
+option. Those options are generated from `deployments.txt`, so the survey and
+the file never disagree.
 
-### Question 1 — Deployments
+### 5a. Generate the survey from deployments.txt
+
+`deployments.txt` must hold your real deployment list (the repository ships
+with four examples). From a checkout of this repository:
+
+```bash
+python3 aap/build_survey_spec.py
+```
+
+This rewrites `aap/survey_spec.json` with every deployment as an option (plus
+`all` for Deployments). Commit and push both files. `python3
+aap/build_survey_spec.py --check` tells you whether the spec is up to date.
+
+### 5b. Load it into the template (recommended)
+
+Uploading the spec sets all nine questions at once — far easier than typing a
+hundred options into the UI. It **replaces** the template's whole survey, so
+any questions you created by hand are swapped for these nine (with the same
+variable names). Find the template's ID (it is in the template's URL), then:
+
+```bash
+AAP=https://aap.example.gov
+API=$AAP/api/controller/v2          # AAP 2.4: API=$AAP/api/v2
+ID=<job template id>
+
+curl -u "<your AAP username>" -H 'Content-Type: application/json' \
+     -X POST "$API/job_templates/$ID/survey_spec/" -d @aap/survey_spec.json
+
+curl -u "<your AAP username>" -H 'Content-Type: application/json' \
+     -X PATCH "$API/job_templates/$ID/" -d '{"survey_enabled": true}'
+```
+
+Open the Survey tab afterwards: there should be nine questions, and the
+**Survey enabled** toggle at the top should be on.
+
+### 5c. Or build it in the UI
+
+Open the template's **Survey** tab and create these questions in this order.
+"Answer variable name" must be exactly as shown — the playbook reads those
+names, and silently ignores any other.
+
+For the options of questions 1 and 2, print the list with:
+
+```bash
+python3 aap/build_survey_spec.py --choices     # all, then every deployment
+```
+
+#### Question 1 — Deployments
 
 | Field | Value |
 | --- | --- |
 | Question | `Deployments` |
-| Description | `Deployment names separated by commas, spaces or new lines (e.g. cdm-va, cdm-fed), or all for every deployment in deployments.txt. all cannot be combined with names.` |
+| Description | `Tick 'all' for every deployment in deployments.txt, or tick individual deployments. Deployments ticked alongside 'all' are already included.` |
 | Answer variable name | `deployments` |
-| Answer type | `Textarea` |
+| Answer type | `Multiple Choice (multiple select)` |
+| Multiple choice options | `all`, then every deployment, one per option (the `--choices` output) |
+| Default answer | None ticked, so every run is a deliberate choice |
 | Required | ✅ Yes |
-| Minimum length | `1` |
-| Maximum length | `10000` |
-| Default answer | Leave blank, so every run is a deliberate choice |
 
-### Question 2 — Run mode
+Ticking `all` runs every deployment in `deployments.txt` — the file, not the
+survey's option list, so a deployment added to the file is included even
+before the survey is regenerated. Ticking `all` together with individual
+deployments is fine: they are already part of `all`.
+
+#### Question 2 — Exclude deployments
+
+| Field | Value |
+| --- | --- |
+| Question | `Exclude deployments` |
+| Description | `Optional. Deployments to leave out, e.g. when 'all' is ticked.` |
+| Answer variable name | `exclude_deployments` |
+| Answer type | `Multiple Choice (multiple select)` |
+| Multiple choice options | Every deployment, **without** `all` (the `--choices` output minus its first line) |
+| Default answer | None ticked |
+| Required | ☐ No |
+
+Exclusions are applied after `all` is expanded. Excluding a deployment that
+was not selected does nothing (the job output says so); excluding every
+selected deployment stops the job before anything runs.
+
+#### Question 3 — Run mode
 
 | Field | Value |
 | --- | --- |
 | Question | `Run mode` |
 | Description | `dry-run reports what would change and changes nothing. execute changes the setting.` |
 | Answer variable name | `run_mode` |
-| Answer type | `Multiple Choice (single select)` |
+| Answer type | `Multiple Choice (single select)` — **not** multiple select |
 | Multiple choice options | `dry-run`, `execute` |
 | Default answer | `dry-run` |
 | Required | ✅ Yes |
 
-### Question 3 — Value to write
+#### Question 4 — Value to write
 
 | Field | Value |
 | --- | --- |
@@ -268,12 +336,12 @@ reads those names.)
 | Default answer | `set-false` |
 | Required | ✅ Yes |
 
-### Question 4 — Only these spaces (optional)
+#### Question 5 — Spaces
 
 | Field | Value |
 | --- | --- |
-| Question | `Only these spaces (optional)` |
-| Description | `Kibana space IDs to limit the run to, separated by commas or spaces (e.g. default, master). Leave blank for every space.` |
+| Question | `Spaces` |
+| Description | `Optional. Only these Kibana space IDs, separated by commas (e.g. default,admin or default, admin). Leave blank for every space.` |
 | Answer variable name | `spaces` |
 | Answer type | `Text` |
 | Required | ☐ No |
@@ -281,12 +349,12 @@ reads those names.)
 | Maximum length | `2048` |
 | Default answer | Leave blank |
 
-### Question 5 — Skip these spaces (optional)
+#### Question 6 — Skip spaces
 
 | Field | Value |
 | --- | --- |
-| Question | `Skip these spaces (optional)` |
-| Description | `Kibana space IDs to leave alone, separated by commas or spaces. Leave blank to skip none.` |
+| Question | `Skip spaces` |
+| Description | `Optional. Kibana space IDs to leave alone, separated by commas (e.g. default,admin,infra or default, admin, infra). Leave blank to skip none.` |
 | Answer variable name | `exclude_spaces` |
 | Answer type | `Text` |
 | Required | ☐ No |
@@ -294,10 +362,12 @@ reads those names.)
 | Maximum length | `2048` |
 | Default answer | Leave blank |
 
-Space IDs are the lowercase IDs (`default`, `master`), not display names
-(`Default`). The playbook rejects anything else before running.
+Both space questions accept `default,admin,infra` and `default, admin, infra`
+alike. Space IDs are the lowercase IDs (`default`, `admin`), not display names
+(`Default`); the playbook rejects anything else before running. The skipped
+spaces apply to every deployment in the run.
 
-### Question 6 — Parallel jobs
+#### Question 7 — Parallel jobs
 
 | Field | Value |
 | --- | --- |
@@ -313,11 +383,11 @@ Space IDs are the lowercase IDs (`default`, `master`), not display names
 Ten copies should keep a 100+ deployment run to minutes rather than tens of
 minutes, without starting a hundred AWS CLI processes on the appserver at once.
 
-### Question 7 — Verify Kibana TLS certificates
+#### Question 8 — Verify Kibana TLS
 
 | Field | Value |
 | --- | --- |
-| Question | `Verify Kibana TLS certificates` |
+| Question | `Verify Kibana TLS` |
 | Description | `Keep true. false skips certificate checks for Kibana (last resort).` |
 | Answer variable name | `verify_ssl` |
 | Answer type | `Multiple Choice (single select)` |
@@ -325,7 +395,7 @@ minutes, without starting a hundred AWS CLI processes on the appserver at once.
 | Default answer | `true` |
 | Required | ✅ Yes |
 
-### Question 8 — Verbose logging
+#### Question 9 — Verbose logging
 
 | Field | Value |
 | --- | --- |
@@ -338,27 +408,9 @@ minutes, without starting a hundred AWS CLI processes on the appserver at once.
 | Required | ✅ Yes |
 
 Finally, make sure the **Survey enabled** toggle at the top of the Survey tab is
-**on**. Without it AAP ignores the questions and the playbook stops with
-"You must pass a `deployments` variable".
-
-### Or: import the survey through the API
-
-`aap/survey_spec.json` holds the same eight questions. Find the template's ID
-(it is in the template's URL), then:
-
-```bash
-AAP=https://aap.example.gov
-API=$AAP/api/controller/v2          # AAP 2.4: API=$AAP/api/v2
-ID=<job template id>
-
-curl -u "<your AAP username>" -H 'Content-Type: application/json' \
-     -X POST "$API/job_templates/$ID/survey_spec/" -d @aap/survey_spec.json
-
-curl -u "<your AAP username>" -H 'Content-Type: application/json' \
-     -X PATCH "$API/job_templates/$ID/" -d '{"survey_enabled": true}'
-```
-
-Open the Survey tab afterwards to check all eight questions are there.
+**on**. A new survey starts disabled, and while it is off AAP shows no
+questions at launch and the playbook stops with "You must pass a `deployments`
+variable".
 
 ---
 
@@ -377,20 +429,22 @@ execute](#optional-dry-run-approval-then-execute).
 
 Do these in order. Each is **Launch** on the template, then the survey.
 
-1. **One deployment, dry run.** Deployments `cdm-va` (or any one you know),
+1. **One deployment, dry run.** Tick one deployment you know (e.g. `cdm-va`),
    Run mode `dry-run`. Expect a green job. Check the space list in the report
    against that deployment's Kibana UI — if spaces are missing, the API key
    cannot see them.
-2. **Everything, dry run.** Deployments `all`, Run mode `dry-run`. Read the
+2. **Everything, dry run.** Tick `all`, Run mode `dry-run`. Read the
    **RUN SUMMARY** at the end: *spaces needing reset* is how many will change,
    and **Needs attention** lists every deployment that failed (missing secret,
    401/403, unreachable Kibana). Fix those before executing. The job is red
    if anything failed, even in a dry run.
-3. **Pilot, execute.** Deployments: two that have the problem (for example the
-   ones you already fixed by hand), Run mode `execute`. Confirm in the Kibana
+3. **Pilot, execute.** Tick two deployments that have the problem (for example
+   the ones you already fixed by hand), Run mode `execute`. Confirm in the Kibana
    UI that the setting is now false and dashboards navigate without the error.
-4. **Everything, execute.** Deployments `all`, Run mode `execute`.
-5. **Proof.** Deployments `all`, Run mode `dry-run` again. Every space should
+4. **Everything, execute.** Tick `all`, Run mode `execute`. To hold some
+   deployments back (for example ones awaiting a separate change), tick them
+   under **Exclude deployments**.
+5. **Proof.** Tick `all`, Run mode `dry-run` again. Every space should
    be *already false* and *spaces needing reset* `0`. Attach this job's output
    or CSV to the change record.
 
@@ -399,6 +453,7 @@ Do these in order. Each is **Launch** on the template, then the survey.
 ## Reading the output
 
 - **Announce run mode** says DRY-RUN or EXECUTE, and lists the deployments.
+  **Announce excluded deployments** lists any you excluded.
 - **Show reset output** is each copy of the script's own log and report, one
   line per event, with a `════════ job N of M ════════` banner between copies.
 - **Show the summary** is one summary across every deployment, then
@@ -428,14 +483,17 @@ happens after someone approves a dry run.
 1. **Automation Execution → Templates → Create template → Create workflow job
    template** (AAP 2.4: **Templates → Add → Add workflow template**). Name it
    `Reset Kibana storeInSessionStorage - approved`, and give it a survey with
-   just the **Deployments** question (the same settings as Question 1).
+   just the **Deployments** and **Exclude deployments** questions (the same
+   settings as Questions 1 and 2). To upload those two from the spec:
+   `jq '.spec |= .[:2]' aap/survey_spec.json > /tmp/wf.json`, then POST
+   `/tmp/wf.json` to `workflow_job_templates/<ID>/survey_spec/` as in Step 5b.
 2. In the workflow visualizer, add three nodes in sequence, each running
    **On success** of the one before:
    - **Job template** `Reset Kibana storeInSessionStorage`, with its survey
      answers set in the node: Run mode `dry-run`. The node's survey still
-     asks for Deployments because that question is required; enter any
-     placeholder (e.g. `all`) — the workflow survey's answer is passed to the
-     node at launch and replaces it.
+     asks for Deployments because that question is required; tick any
+     placeholder (e.g. `all`) — the workflow survey's answers are passed to
+     the node at launch and replace it.
    - **Approval** node: name `Approve the reset`, with a timeout of a few
      hours. The approver reads the dry run's summary before approving.
    - **Job template** `Reset Kibana storeInSessionStorage` again, with Run
@@ -445,7 +503,7 @@ happens after someone approves a dry run.
 4. **Test the workflow with a dry run in both nodes first.** Set the third
    node's Run mode to `dry-run` too, launch the workflow for one deployment,
    and open both resulting jobs: their **Extra variables** must show the
-   deployment you entered in the workflow survey, not the placeholder. Only
+   deployment you ticked in the workflow survey, not the placeholder. Only
    then switch the third node to `execute`.
 
 ---
@@ -453,9 +511,16 @@ happens after someone approves a dry run.
 ## Updating the deployment list
 
 `all` reads `deployments.txt` from the project checkout, so the list is version
-controlled. To add or remove a deployment, edit `deployments.txt` on `main`
-(one per line, or separated by commas; `#` starts a comment). With **Update
-revision on launch** checked, the next job uses the new list — no sync needed.
+controlled. The survey's options, though, are stored in AAP, not read from git.
+To add or remove a deployment:
+
+1. Edit `deployments.txt` on `main` (one per line, or separated by commas; `#`
+   starts a comment).
+2. Run `python3 aap/build_survey_spec.py`, and commit and push both files.
+3. Upload the new survey (Step 5b). Until you do, the change already applies to
+   `all` — **Update revision on launch** makes every job use the latest file —
+   but a new deployment cannot be ticked individually, and a removed one is
+   still offered.
 
 ---
 
@@ -463,8 +528,12 @@ revision on launch** checked, the next job uses the new list — no sync needed.
 
 | What you see | Cause | Fix |
 | --- | --- | --- |
+| The survey does not appear at launch | **Survey enabled** is off, or the job was started with **Relaunch**, a schedule or a workflow node (none of which show the survey) | Turn on **Survey enabled** (Step 5); launch from the template itself |
 | `You must pass a deployments variable` | Survey not enabled, or no answer | Turn on **Survey enabled** (Step 5) |
-| `'all' ... cannot be combined with other names` | `all` plus names in Deployments | Use `all` on its own, or only names |
+| `run_mode must be 'dry-run' or 'execute' - got '['dry-run']'` (or the same for `value_mode`) | The question is **Multiple Choice (multiple select)**, which sends a list | Change its answer type to **Multiple Choice (single select)** |
+| A deployment is not offered in Deployments | The survey was built before it was added to `deployments.txt` | Regenerate and upload the survey (see Updating the deployment list) |
+| `exclude_deployments leaves nothing to do` | Every selected deployment is also excluded | Untick some exclusions |
+| `exclude_deployments names deployment(s) that were not selected` | An excluded deployment was not part of the selection | Nothing to fix — it is a note; check it was not a mis-click |
 | `Not valid Kibana space IDs` | A display name such as `Default` in a space question | Use the lowercase space ID, e.g. `default` |
 | `not found on <host> with PATH=...: aws` | AWS CLI (or jq) not installed, or outside the PATH | Install it, or add its directory to the front of `script_path` |
 | `ca_bundle ... does not exist on the appserver` | Different CA bundle path on this host | Set `ca_bundle` (and `aws_ca_bundle`) in Extra variables |
