@@ -56,6 +56,7 @@ generated from `deployments.txt`: after changing the file, run
 | `aap/survey_spec.json` | The job template survey (generated) |
 | `aap/build_survey_spec.py` | Generates the survey from `deployments.txt` |
 | `docs/aap-setup.md` | AAP setup, step by step |
+| `docs/test-plan.md` | Manual test cases for the script, the AAP job and the fix in Kibana |
 | `tests/` | Test suites for the script and the playbook |
 
 ## Deployment → secret mapping
