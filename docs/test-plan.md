@@ -1,66 +1,46 @@
 # Test plan: reset_kibana_state_session
 
-Six checks of the AAP job template **Reset Kibana storeInSessionStorage**. The
-script has already run successfully in production, so these focus on the
-survey, the newer options (excluding deployments, skipping spaces) and the
-end result in Kibana.
+Four essential checks of the AAP job template **Reset Kibana
+storeInSessionStorage**: that it reaches every deployment, changes the setting
+in every space, is safe to re-run, and fixes the error.
 
-Launch the template from **Templates** (not Relaunch, which skips the survey)
-and note each job ID in the results table.
-
-**Safety:** dry runs change nothing and are safe anywhere. Only TC-5 uses
-`execute`, on one deployment agreed with the change owner.
+Launch the template from **Templates** and note each job ID in the results
+table. Only TC-2 changes anything, on one deployment agreed with the change
+owner.
 
 ---
 
-### TC-1 — Survey is correct
+### TC-1 — Dry run reaches every deployment and changes nothing
 
-Click **Launch** and check the survey before answering.
+Tick `all`, Run mode `dry-run`, everything else at its defaults.
 
-**Expected:** **Deployments** offers `all` plus the six deployments (`cdm-fed`,
-`cdm-va`, `cdm-dos`, `cdm-tva`, `cdm-abmc`, `cdm-nasa`). **Exclude deployments**
-offers the six without `all`. **Run mode** is single select, default `dry-run`.
+**Expected:** job is green; the **RUN SUMMARY** shows `deployments in report :
+6` and `failures : 0`. For one deployment, the number of spaces listed matches
+**Stack Management → Spaces** in its Kibana. Nothing is changed.
 
-### TC-2 — Dry run of all deployments
+### TC-2 — Execute resets every space
 
-Tick `all`; leave everything else at its defaults.
+Tick the agreed deployment, Run mode `execute`.
 
-**Expected:** `DRY-RUN MODE ... Checking 6 deployment(s)`, then a **RUN
-SUMMARY** with `deployments in report : 6`. Any rows under **Needs attention**
-are findings to report (usually access problems). Record the job's duration.
+**Expected:** job is green; every space ends `reset` or `already-false`, with
+no failures. In Kibana, **Stack Management → Advanced Settings** in two or
+three of its spaces shows `storeInSessionStorage` off.
 
-### TC-3 — Exclude deployments
+### TC-3 — Re-running is safe
 
-Tick `all`; under **Exclude deployments** tick `cdm-nasa` and `cdm-tva`.
+Repeat TC-2 exactly.
 
-**Expected:** `Excluding 2 deployment(s): cdm-tva, cdm-nasa` and `Checking 4
-deployment(s)`; neither excluded deployment appears in the output.
+**Expected:** job is green; every space shows `already-false` and the summary
+shows `spaces reset to false : 0`.
 
-### TC-4 — Skip spaces, with and without spaces after commas
-
-Two dry runs of one deployment, with **Skip spaces** set to `default,admin`,
-then to `default, admin` (use real space IDs from that deployment).
-
-**Expected (both):** those spaces show `skipped` / `excluded by
---exclude-spaces`; every other space is still checked.
-
-### TC-5 — Execute on one deployment
-
-Tick the agreed deployment, Run mode `execute`. Then run the same thing again.
-
-**Expected:** first run is green, every space ends `reset` or `already-false`,
-no failures. The second run shows every space `already-false` (nothing
-changed). In Kibana, **Stack Management → Advanced Settings** in any space of
-that deployment shows `storeInSessionStorage` off.
-
-### TC-6 — The error is gone
+### TC-4 — The error is gone
 
 In that deployment, open a dashboard, change the time range, open another
-dashboard and go back with the browser's Back button.
+dashboard, then go back with the browser's Back button.
 
-**Expected:** no "Unable to completely restore the URL" message; the URL
-contains `_g=(` (full state) rather than `_g=h@` (a hash). Bookmarks saved
-before the reset may still fail — that is expected.
+**Expected:** no "Unable to completely restore the URL" message, and the URL
+contains `_g=(` rather than `_g=h@`. (Bookmarks saved before the reset may
+still fail; that is expected.)
 
 ---
 
@@ -68,12 +48,10 @@ before the reset may still fail — that is expected.
 
 | ID | Check | Result (Pass / Fail) | AAP job ID | Notes |
 | --- | --- | --- | --- | --- |
-| TC-1 | Survey is correct | | | |
-| TC-2 | Dry run of all deployments | | | |
-| TC-3 | Exclude deployments | | | |
-| TC-4 | Skip spaces, both comma forms | | | |
-| TC-5 | Execute on one deployment | | | |
-| TC-6 | The error is gone | | | |
+| TC-1 | Dry run reaches every deployment and changes nothing | | | |
+| TC-2 | Execute resets every space | | | |
+| TC-3 | Re-running is safe | | | |
+| TC-4 | The error is gone | | | |
 
 For a failure, add the job ID, the survey answers, and expected versus actual
 to the Jira task.
