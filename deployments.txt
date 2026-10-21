@@ -18,6 +18,5 @@ cdm-fed
 cdm-va
 cdm-dos
 cdm-tva
-cdm-tva
 cdm-abmc
 cdm-nasa
